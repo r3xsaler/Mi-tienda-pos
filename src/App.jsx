@@ -25,7 +25,7 @@ import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 
-// --- CONFIGURACIÓN FIREBASE (Tus credenciales originales) ---
+// --- CONFIGURACIÓN FIREBASE ---
 const firebaseConfig = {
     apiKey: "AIzaSyAxW3KzbHcFx7XhsILXPkl3fagnP8HkzFU",
     authDomain: "r3xsaler-project-v1.firebaseapp.com",
@@ -41,7 +41,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = "1:959213104686:web:5e5a33b1a32dd99590f9bf";
 
-// --- UTILIDADES (Idénticas a tu HTML) ---
+// --- UTILIDADES ---
 const roundToTwo = (num) => {
   if (isNaN(num) || !isFinite(num)) return 0;
   return Math.round(num * 100) / 100;
@@ -163,7 +163,7 @@ function App() {
   const [onConfirmAction, setOnConfirmAction] = useState(() => {});
   const [showInventoryModal, setShowInventoryModal] = useState(false);
   
-  // Estados de formulario
+  // Estados de formulario (NUEVOS ESTADOS AGREGADOS: hasFixedPrice, fixedPriceAmount)
   const [productName, setProductName] = useState('');
   const [productCategory, setProductCategory] = useState(productCategories[0]);
   const [productType, setProductType] = useState('Unidad');
@@ -172,6 +172,8 @@ function App() {
   const [productProfit, setProductProfit] = useState('');
   const [productCode, setProductCode] = useState('');
   const [productStock, setProductStock] = useState('');
+  const [hasFixedPrice, setHasFixedPrice] = useState(false); // Nuevo
+  const [fixedPriceAmount, setFixedPriceAmount] = useState(''); // Nuevo
   const [editingProduct, setEditingProduct] = useState(null);
   
   const [inventorySearchTerm, setInventorySearchTerm] = useState('');
@@ -223,7 +225,7 @@ function App() {
       const salesList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       setSalesHistory(salesList);
     }, (error) => {
-         // Fallback por si acaso falla el ordenamiento inicial
+         // Fallback
          const simpleQuery = query(salesCollection, limit(50));
          getDocs(simpleQuery).then(snap => {
              const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -272,30 +274,68 @@ function App() {
   const handleLogin = async (email, password) => { try { await signInWithEmailAndPassword(auth, email, password); setAuthError(''); } catch (error) { setAuthError('Verifica los datos.'); } };
   const handleLogout = async () => { await signOut(auth); setUserId(null); setCurrentPage('home'); };
 
+  // --- LÓGICA DE PRECIOS MODIFICADA (CRÍTICO) ---
   const calculateSalePrice = (product) => {
+    // 1. Calcular costo de reposición (siempre necesario para la ganancia)
     const costInDollars = (product.acquisitionRate > 0) ? product.costBs / product.acquisitionRate : 0;
-    const profitMargin = product.profitPercentage / 100;
-    const salePriceInDollars = roundToTwo(costInDollars * (1 + profitMargin));
-    const salePriceBs = (dailyRate > 0) ? roundToTwo(salePriceInDollars * dailyRate) : 0;
     const currentCostBs = (dailyRate > 0) ? roundToTwo(costInDollars * dailyRate) : 0;
-    return { salePriceBs, costInDollars, salePriceInDollars, currentCostBs };
+    
+    let salePriceBs, salePriceInDollars;
+
+    // 2. Lógica Condicional: Precio Fijo vs Precio Dinámico
+    if (product.hasFixedPrice) {
+        // CASO PRECIO FIJO
+        salePriceBs = parseFloat(product.fixedPriceAmount) || 0;
+        
+        // Calculamos dólares inversos para estadísticas internas del carrito
+        salePriceInDollars = (dailyRate > 0) ? roundToTwo(salePriceBs / dailyRate) : 0;
+    } else {
+        // CASO ESTÁNDAR (DINÁMICO)
+        const profitMargin = product.profitPercentage / 100;
+        salePriceInDollars = roundToTwo(costInDollars * (1 + profitMargin));
+        salePriceBs = (dailyRate > 0) ? roundToTwo(salePriceInDollars * dailyRate) : 0;
+    }
+
+    return { 
+        salePriceBs, 
+        costInDollars, 
+        salePriceInDollars, 
+        currentCostBs,
+        hasFixedPrice: product.hasFixedPrice || false 
+    };
   };
 
   const handleSearch = (e) => { setSearchTerm(e.target.value); };
+  
+  // Limpiar formulario incluyendo campos nuevos
   const clearForm = () => {
     setProductName(''); setProductCategory(productCategories[0]); setProductType('Unidad'); setProductCost('');
-    setProductAcquisitionRate(''); setProductProfit(''); setProductCode(''); setProductStock(''); setEditingProduct(null);
+    setProductAcquisitionRate(''); setProductProfit(''); setProductCode(''); setProductStock(''); 
+    setHasFixedPrice(false); setFixedPriceAmount(''); // Reset nuevos campos
+    setEditingProduct(null);
   };
 
   const handleAddOrUpdateProduct = async () => {
+    // Validación básica
     if (!productName || productCost === '' || productAcquisitionRate === '' || productProfit === '' || (productStock === '' && productType === 'Unidad')) {
-      setGenericModalTitle('Error'); setGenericModalMessage('Rellene todos los campos.'); setShowGenericModal(true); return;
+      setGenericModalTitle('Error'); setGenericModalMessage('Rellene todos los campos básicos.'); setShowGenericModal(true); return;
     }
+    
+    // Validación Precio Fijo
+    if (hasFixedPrice && (fixedPriceAmount === '' || parseFloat(fixedPriceAmount) <= 0)) {
+        setGenericModalTitle('Error'); setGenericModalMessage('Si activa Precio Fijo, debe ingresar un monto en Bs válido.'); setShowGenericModal(true); return;
+    }
+
     const newProduct = {
       name: productName, category: productCategory, type: productType,
       costBs: parseFloat(productCost) || 0, acquisitionRate: parseFloat(productAcquisitionRate) || 0,
       profitPercentage: parseFloat(productProfit) || 0, code: productCode,
       stock: productType === 'Unidad' ? parseInt(productStock, 10) || 0 : parseFloat(productStock) || 0,
+      
+      // Guardar propiedades de Precio Fijo
+      hasFixedPrice: hasFixedPrice,
+      fixedPriceAmount: hasFixedPrice ? parseFloat(fixedPriceAmount) : 0,
+      
       createdAt: serverTimestamp()
     };
     try {
@@ -308,7 +348,13 @@ function App() {
   const startEditingProduct = (product) => {
     setEditingProduct(product); setProductName(product.name); setProductCategory(product.category); setProductType(product.type);
     setProductCost(product.costBs); setProductAcquisitionRate(product.acquisitionRate); setProductProfit(product.profitPercentage);
-    setProductCode(product.code || ''); setProductStock(product.stock); setShowInventoryModal(true);
+    setProductCode(product.code || ''); setProductStock(product.stock);
+    
+    // Cargar datos de precio fijo
+    setHasFixedPrice(product.hasFixedPrice || false);
+    setFixedPriceAmount(product.fixedPriceAmount || '');
+    
+    setShowInventoryModal(true);
   };
 
   const handleDeleteProduct = (productId) => {
@@ -323,7 +369,10 @@ function App() {
     if (quantity <= 0) return;
     const existingCartItem = cart.find(item => item.id === product.id);
     const { salePriceBs, costInDollars, salePriceInDollars, currentCostBs } = calculateSalePrice(product);
+    
+    // Ganancia es PrecioVenta - CostoReposicionActual
     const profitPerItem = roundToTwo(salePriceBs - currentCostBs);
+    
     const newCartItem = { ...product, quantity, salePriceInBs: salePriceBs, salePriceInDollars: salePriceInDollars, profitPerItem: profitPerItem };
     if (existingCartItem) {
       setCart(cart.map(item => item.id === product.id ? { ...item, quantity: roundToTwo(item.quantity + quantity) } : item));
@@ -337,6 +386,8 @@ function App() {
 
     const totalSaleBs = roundToTwo(cart.reduce((sum, item) => sum + item.salePriceInBs * item.quantity, 0));
     const totalProfitBs = roundToTwo(cart.reduce((sum, item) => sum + item.profitPerItem * item.quantity, 0));
+    
+    // Calculo total dólares dividiendo el total Bolívares entre la tasa (Maneja el inverso correctamente)
     const totalSaleDollars = (dailyRate > 0) ? roundToTwo(totalSaleBs / dailyRate) : 0;
 
     const newSale = {
@@ -383,11 +434,9 @@ function App() {
     setShowConfirmModal(true);
   };
 
-  // ESTA ES LA FUNCIÓN DEL HTML ORIGINAL QUE FALTABA Y QUE CAUSABA EL ERROR
   const handleDownloadAndResetHistory = async () => {
     if (salesHistory.length === 0) { showToast('No hay ventas', 'info'); return; }
     
-    // MEJORA: Solo descarga, NO borra el historial para mayor seguridad
     setConfirmModalTitle('Reporte de Ventas');
     setConfirmModalMessage('¿Descargar reporte en PDF? (Tus datos NO serán borrados)');
     
@@ -456,6 +505,18 @@ function App() {
 
   const totalGlobalProfit = roundToTwo(salesHistory.reduce((sum, sale) => sum + sale.totalProfitBs, 0));
 
+  // --- CALCULO AUXILIAR PARA PREVIEW DE FORMULARIO ---
+  const calculateSuggestedPrice = () => {
+      const pCost = parseFloat(productCost) || 0;
+      const pRate = parseFloat(productAcquisitionRate) || 1;
+      const pProfit = parseFloat(productProfit) || 0;
+      
+      const costInDollars = (pRate > 0) ? pCost / pRate : 0;
+      const suggestedInDollars = costInDollars * (1 + (pProfit/100));
+      const suggestedBs = suggestedInDollars * dailyRate;
+      return formatBs(suggestedBs);
+  };
+
   const renderPage = () => {
     if (isLoading) { return <div className="flex justify-center h-screen items-center text-gray-500 font-bold animate-pulse">Cargando sistema...</div>; }
     if (!userId) { return <AuthScreen onLogin={handleLogin} onRegister={handleRegister} errorMessage={authError}/>; }
@@ -500,15 +561,20 @@ function App() {
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {inventoryList.map(product => {
-                            const { salePriceBs, salePriceInDollars } = calculateSalePrice(product);
+                            const { salePriceBs, salePriceInDollars, hasFixedPrice } = calculateSalePrice(product);
                             return (
                                 <tr key={product.id} className="bg-white hover:bg-gray-50">
                                     <td className={`px-2 py-2 text-sm font-bold text-center ${parseFloat(product.stock) < 5 ? 'text-red-600 bg-red-100' : 'text-gray-800'}`}>
                                         {product.type === 'Peso' ? product.stock.toFixed(3) : product.stock}
                                     </td>
                                     <td className="px-2 py-2 text-sm font-medium text-gray-900 break-words">{product.name}</td>
-                                    <td className="px-2 py-2 text-sm font-semibold text-right text-gray-700">{formatUSD(salePriceInDollars)}</td>
-                                    <td className="px-2 py-2 text-sm font-semibold text-right text-gray-700">{formatBs(salePriceBs)}</td>
+                                    {/* Muestra un guion si es precio fijo, sino muestra el precio en dolares */}
+                                    <td className="px-2 py-2 text-sm font-semibold text-right text-gray-700">
+                                        {hasFixedPrice ? '-' : formatUSD(salePriceInDollars)}
+                                    </td>
+                                    <td className={`px-2 py-2 text-sm font-semibold text-right ${hasFixedPrice ? 'text-blue-700 bg-blue-50' : 'text-gray-700'}`}>
+                                        {formatBs(salePriceBs)}
+                                    </td>
                                     <td className="px-2 py-2 text-right text-sm font-medium">
                                         <div className="flex justify-center items-center space-x-1">
                                             <button onClick={() => startEditingProduct(product)} className="text-indigo-600 hover:text-indigo-900 p-1">Edit</button>
@@ -535,11 +601,36 @@ function App() {
                         <div><label className="block text-gray-700 font-semibold mb-2">Nombre</label><input type="text" className="w-full px-4 py-2 border rounded-xl" value={productName} onChange={(e) => setProductName(e.target.value)} /></div>
                         <div><label className="block text-gray-700 font-semibold mb-2">Categoría</label><select className="w-full px-4 py-2 border rounded-xl" value={productCategory} onChange={(e) => setProductCategory(e.target.value)}>{productCategories.map(cat => <option key={cat} value={cat}>{cat}</option>)}</select></div>
                         <div><label className="block text-gray-700 font-semibold mb-2">Código</label><input type="text" className="w-full px-4 py-2 border rounded-xl" value={productCode} onChange={(e) => setProductCode(e.target.value)} /></div>
+                        
                         <div className="md:col-span-1"><label className="block text-gray-700 font-semibold mb-2">Tipo</label><div className="flex items-center space-x-4"><label className="inline-flex items-center"><input type="radio" name="productType" value="Unidad" checked={productType === 'Unidad'} onChange={() => setProductType('Unidad')} /><span className="ml-2">Unidad</span></label><label className="inline-flex items-center"><input type="radio" name="productType" value="Por Kilo/Gramo" checked={productType === 'Por Kilo/Gramo'} onChange={() => setProductType('Por Kilo/Gramo')} /><span className="ml-2">Peso</span></label></div></div>
+                        
                         <div><label className="block text-gray-700 font-semibold mb-2">Costo (Bs)</label><input type="number" step="0.01" inputMode="decimal" className="w-full px-4 py-2 border rounded-xl" value={productCost === 0 ? '' : productCost} onChange={(e) => setProductCost(e.target.value)} /></div>
                         <div><label className="block text-gray-700 font-semibold mb-2">Tasa Adq.</label><input type="number" step="0.01" inputMode="decimal" className="w-full px-4 py-2 border rounded-xl" value={productAcquisitionRate === 0 ? '' : productAcquisitionRate} onChange={(e) => setProductAcquisitionRate(e.target.value)} /></div>
                         <div><label className="block text-gray-700 font-semibold mb-2">Ganancia (%)</label><input type="number" step="0.01" inputMode="decimal" className="w-full px-4 py-2 border rounded-xl" value={productProfit === 0 ? '' : productProfit} onChange={(e) => setProductProfit(e.target.value)} /></div>
+                        
                         {productType === 'Unidad' && (<div><label className="block text-gray-700 font-semibold mb-2">Stock</label><input type="number" inputMode="numeric" className="w-full px-4 py-2 border rounded-xl" value={productStock === 0 ? '' : productStock} onChange={(e) => setProductStock(e.target.value)} /></div>)}
+
+                        {/* --- SECCIÓN NUEVA: PRECIO FIJO --- */}
+                        <div className="md:col-span-3 border-t pt-4 mt-2">
+                            <label className="flex items-center space-x-3 cursor-pointer">
+                                <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={hasFixedPrice} onChange={(e) => setHasFixedPrice(e.target.checked)} />
+                                <span className="text-gray-800 font-bold text-lg">¿Precio Fijo en Bolívares?</span>
+                            </label>
+                            
+                            {hasFixedPrice && (
+                                <div className="mt-4 flex flex-col md:flex-row items-center gap-4 bg-blue-50 p-4 rounded-xl border border-blue-100">
+                                    <div className="w-full md:w-1/2">
+                                        <label className="block text-blue-800 font-semibold mb-2">Precio Fijo (Bs)</label>
+                                        <input type="number" step="0.01" inputMode="decimal" className="w-full px-4 py-2 border border-blue-300 rounded-xl focus:ring-blue-500" placeholder="Ej: 150.00" value={fixedPriceAmount} onChange={(e) => setFixedPriceAmount(e.target.value)} />
+                                    </div>
+                                    <div className="w-full md:w-1/2 text-sm text-blue-700">
+                                        <p className="font-bold">Referencia Sugerida:</p>
+                                        <p>Según costo y ganancia actual: <span className="font-bold text-lg">Bs. {calculateSuggestedPrice()}</span></p>
+                                        <p className="mt-1 text-xs opacity-75">*Este precio no cambiará con la tasa del día.</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                       </div>
                    </div>
                    <div className="p-4 border-t border-gray-100 flex flex-col-reverse md:flex-row justify-end gap-3 bg-white rounded-b-2xl">
@@ -554,6 +645,7 @@ function App() {
 
       case 'cart':
         const totalBs = roundToTwo(cart.reduce((sum, item) => sum + item.salePriceInBs * item.quantity, 0));
+        // Calculo Inverso Dólares: Total Bs / DailyRate
         const totalDollars = (dailyRate > 0) ? roundToTwo(totalBs / dailyRate) : 0;
 
         return (
@@ -564,12 +656,18 @@ function App() {
                 <input type="text" className="w-full px-12 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Buscar producto..." value={searchTerm} onChange={handleSearch} />
                 {filteredProducts.length > 0 && (
                   <ul className="absolute z-10 w-full bg-white border border-gray-200 rounded-xl shadow-lg mt-1 max-h-60 overflow-y-auto">
-                    {filteredProducts.map(product => (
-                      <li key={product.id} className="p-3 hover:bg-gray-100 cursor-pointer flex justify-between items-center" onClick={() => { if (product.type === 'Por Kilo/Gramo') { setWeightProduct(product); setShowWeightModal(true); } else { setProductToAdd(product); setQuantityToAdd(''); setShowQuantityModal(true); } }}>
-                        <div><span className="font-bold text-gray-800">{product.name}</span><span className="text-sm text-gray-500 block">Stock: {product.stock}</span></div>
-                        <span className="text-sm text-gray-600">Bs. {formatBs(calculateSalePrice(product).salePriceBs)}</span>
-                      </li>
-                    ))}
+                    {filteredProducts.map(product => {
+                       const priceInfo = calculateSalePrice(product);
+                       return (
+                          <li key={product.id} className="p-3 hover:bg-gray-100 cursor-pointer flex justify-between items-center" onClick={() => { if (product.type === 'Por Kilo/Gramo') { setWeightProduct(product); setShowWeightModal(true); } else { setProductToAdd(product); setQuantityToAdd(''); setShowQuantityModal(true); } }}>
+                            <div>
+                                <span className="font-bold text-gray-800">{product.name}</span>
+                                <span className="text-sm text-gray-500 block">Stock: {product.stock} {product.hasFixedPrice && <span className="text-blue-600 font-bold ml-2">(Fijo)</span>}</span>
+                            </div>
+                            <span className="text-sm text-gray-600">Bs. {formatBs(priceInfo.salePriceBs)}</span>
+                          </li>
+                       );
+                    })}
                   </ul>
                 )}
               </div>
@@ -586,7 +684,7 @@ function App() {
                       return (
                           <div key={index} className="flex justify-between items-center p-4 border-b border-gray-200 last:border-b-0">
                             <div className="flex-grow min-w-0 pr-4">
-                               <p className="font-semibold text-gray-700 whitespace-normal">{item.name}</p>
+                               <p className="font-semibold text-gray-700 whitespace-normal">{item.name} {item.hasFixedPrice && <span className="text-xs bg-blue-100 text-blue-800 px-1 rounded">Fijo</span>}</p>
                                <p className="text-sm text-gray-500">{displayUnit}</p>
                             </div>
                             <div className="flex items-center space-x-4 flex-shrink-0">
@@ -649,8 +747,6 @@ function App() {
           </div>
         );
 
-      // --- ESTA ES LA SECCIÓN QUE DABA EL ERROR CORREGIDA ---
-      // Ahora usa la función formatDate en lugar de cálculos manuales de fecha
       case 'history':
         return (
           <div className="p-4 md:p-8 space-y-8 animate-fade-in-up">
