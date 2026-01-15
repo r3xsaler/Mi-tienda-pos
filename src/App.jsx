@@ -163,7 +163,7 @@ function App() {
   const [onConfirmAction, setOnConfirmAction] = useState(() => {});
   const [showInventoryModal, setShowInventoryModal] = useState(false);
   
-  // Estados de formulario (NUEVOS ESTADOS AGREGADOS: hasFixedPrice, fixedPriceAmount)
+  // Estados de formulario
   const [productName, setProductName] = useState('');
   const [productCategory, setProductCategory] = useState(productCategories[0]);
   const [productType, setProductType] = useState('Unidad');
@@ -172,8 +172,8 @@ function App() {
   const [productProfit, setProductProfit] = useState('');
   const [productCode, setProductCode] = useState('');
   const [productStock, setProductStock] = useState('');
-  const [hasFixedPrice, setHasFixedPrice] = useState(false); // Nuevo
-  const [fixedPriceAmount, setFixedPriceAmount] = useState(''); // Nuevo
+  const [hasFixedPrice, setHasFixedPrice] = useState(false);
+  const [fixedPriceAmount, setFixedPriceAmount] = useState('');
   const [editingProduct, setEditingProduct] = useState(null);
   
   const [inventorySearchTerm, setInventorySearchTerm] = useState('');
@@ -225,7 +225,6 @@ function App() {
       const salesList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       setSalesHistory(salesList);
     }, (error) => {
-         // Fallback
          const simpleQuery = query(salesCollection, limit(50));
          getDocs(simpleQuery).then(snap => {
              const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -274,24 +273,18 @@ function App() {
   const handleLogin = async (email, password) => { try { await signInWithEmailAndPassword(auth, email, password); setAuthError(''); } catch (error) { setAuthError('Verifica los datos.'); } };
   const handleLogout = async () => { await signOut(auth); setUserId(null); setCurrentPage('home'); };
 
-  // --- LÓGICA DE PRECIOS MODIFICADA (CRÍTICO) ---
   const calculateSalePrice = (product) => {
-    // 1. Calcular costo de reposición (siempre necesario para la ganancia)
     const costInDollars = (product.acquisitionRate > 0) ? product.costBs / product.acquisitionRate : 0;
     const currentCostBs = (dailyRate > 0) ? roundToTwo(costInDollars * dailyRate) : 0;
     
     let salePriceBs, salePriceInDollars;
 
-    // 2. Lógica Condicional: Precio Fijo vs Precio Dinámico
     if (product.hasFixedPrice) {
-        // CASO PRECIO FIJO
         salePriceBs = parseFloat(product.fixedPriceAmount) || 0;
-        
-        // Calculamos dólares inversos para estadísticas internas del carrito
         salePriceInDollars = (dailyRate > 0) ? roundToTwo(salePriceBs / dailyRate) : 0;
     } else {
-        // CASO ESTÁNDAR (DINÁMICO)
         const profitMargin = product.profitPercentage / 100;
+        // Aquí se redondea el precio en dólares ANTES de convertir a Bs
         salePriceInDollars = roundToTwo(costInDollars * (1 + profitMargin));
         salePriceBs = (dailyRate > 0) ? roundToTwo(salePriceInDollars * dailyRate) : 0;
     }
@@ -307,21 +300,18 @@ function App() {
 
   const handleSearch = (e) => { setSearchTerm(e.target.value); };
   
-  // Limpiar formulario incluyendo campos nuevos
   const clearForm = () => {
     setProductName(''); setProductCategory(productCategories[0]); setProductType('Unidad'); setProductCost('');
     setProductAcquisitionRate(''); setProductProfit(''); setProductCode(''); setProductStock(''); 
-    setHasFixedPrice(false); setFixedPriceAmount(''); // Reset nuevos campos
+    setHasFixedPrice(false); setFixedPriceAmount('');
     setEditingProduct(null);
   };
 
   const handleAddOrUpdateProduct = async () => {
-    // Validación básica
     if (!productName || productCost === '' || productAcquisitionRate === '' || productProfit === '' || (productStock === '' && productType === 'Unidad')) {
       setGenericModalTitle('Error'); setGenericModalMessage('Rellene todos los campos básicos.'); setShowGenericModal(true); return;
     }
     
-    // Validación Precio Fijo
     if (hasFixedPrice && (fixedPriceAmount === '' || parseFloat(fixedPriceAmount) <= 0)) {
         setGenericModalTitle('Error'); setGenericModalMessage('Si activa Precio Fijo, debe ingresar un monto en Bs válido.'); setShowGenericModal(true); return;
     }
@@ -331,11 +321,8 @@ function App() {
       costBs: parseFloat(productCost) || 0, acquisitionRate: parseFloat(productAcquisitionRate) || 0,
       profitPercentage: parseFloat(productProfit) || 0, code: productCode,
       stock: productType === 'Unidad' ? parseInt(productStock, 10) || 0 : parseFloat(productStock) || 0,
-      
-      // Guardar propiedades de Precio Fijo
       hasFixedPrice: hasFixedPrice,
       fixedPriceAmount: hasFixedPrice ? parseFloat(fixedPriceAmount) : 0,
-      
       createdAt: serverTimestamp()
     };
     try {
@@ -349,11 +336,8 @@ function App() {
     setEditingProduct(product); setProductName(product.name); setProductCategory(product.category); setProductType(product.type);
     setProductCost(product.costBs); setProductAcquisitionRate(product.acquisitionRate); setProductProfit(product.profitPercentage);
     setProductCode(product.code || ''); setProductStock(product.stock);
-    
-    // Cargar datos de precio fijo
     setHasFixedPrice(product.hasFixedPrice || false);
     setFixedPriceAmount(product.fixedPriceAmount || '');
-    
     setShowInventoryModal(true);
   };
 
@@ -369,10 +353,7 @@ function App() {
     if (quantity <= 0) return;
     const existingCartItem = cart.find(item => item.id === product.id);
     const { salePriceBs, costInDollars, salePriceInDollars, currentCostBs } = calculateSalePrice(product);
-    
-    // Ganancia es PrecioVenta - CostoReposicionActual
     const profitPerItem = roundToTwo(salePriceBs - currentCostBs);
-    
     const newCartItem = { ...product, quantity, salePriceInBs: salePriceBs, salePriceInDollars: salePriceInDollars, profitPerItem: profitPerItem };
     if (existingCartItem) {
       setCart(cart.map(item => item.id === product.id ? { ...item, quantity: roundToTwo(item.quantity + quantity) } : item));
@@ -386,8 +367,6 @@ function App() {
 
     const totalSaleBs = roundToTwo(cart.reduce((sum, item) => sum + item.salePriceInBs * item.quantity, 0));
     const totalProfitBs = roundToTwo(cart.reduce((sum, item) => sum + item.profitPerItem * item.quantity, 0));
-    
-    // Calculo total dólares dividiendo el total Bolívares entre la tasa (Maneja el inverso correctamente)
     const totalSaleDollars = (dailyRate > 0) ? roundToTwo(totalSaleBs / dailyRate) : 0;
 
     const newSale = {
@@ -505,15 +484,18 @@ function App() {
 
   const totalGlobalProfit = roundToTwo(salesHistory.reduce((sum, sale) => sum + sale.totalProfitBs, 0));
 
-  // --- CALCULO AUXILIAR PARA PREVIEW DE FORMULARIO ---
+  // --- CORRECCIÓN DE REDONDEO AQUÍ ---
   const calculateSuggestedPrice = () => {
       const pCost = parseFloat(productCost) || 0;
-      const pRate = parseFloat(productAcquisitionRate) || 1;
+      const pRate = parseFloat(productAcquisitionRate) || 0;
       const pProfit = parseFloat(productProfit) || 0;
       
       const costInDollars = (pRate > 0) ? pCost / pRate : 0;
-      const suggestedInDollars = costInDollars * (1 + (pProfit/100));
-      const suggestedBs = suggestedInDollars * dailyRate;
+      // IMPORTANTE: Redondeamos el precio en dólares a 2 decimales ANTES de multiplicar por la tasa
+      // Esto iguala la lógica de calculateSalePrice
+      const suggestedInDollars = roundToTwo(costInDollars * (1 + (pProfit/100)));
+      
+      const suggestedBs = (dailyRate > 0) ? suggestedInDollars * dailyRate : 0;
       return formatBs(suggestedBs);
   };
 
@@ -568,7 +550,6 @@ function App() {
                                         {product.type === 'Peso' ? product.stock.toFixed(3) : product.stock}
                                     </td>
                                     <td className="px-2 py-2 text-sm font-medium text-gray-900 break-words">{product.name}</td>
-                                    {/* Muestra un guion si es precio fijo, sino muestra el precio en dolares */}
                                     <td className="px-2 py-2 text-sm font-semibold text-right text-gray-700">
                                         {hasFixedPrice ? '-' : formatUSD(salePriceInDollars)}
                                     </td>
@@ -610,7 +591,6 @@ function App() {
                         
                         {productType === 'Unidad' && (<div><label className="block text-gray-700 font-semibold mb-2">Stock</label><input type="number" inputMode="numeric" className="w-full px-4 py-2 border rounded-xl" value={productStock === 0 ? '' : productStock} onChange={(e) => setProductStock(e.target.value)} /></div>)}
 
-                        {/* --- SECCIÓN NUEVA: PRECIO FIJO --- */}
                         <div className="md:col-span-3 border-t pt-4 mt-2">
                             <label className="flex items-center space-x-3 cursor-pointer">
                                 <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={hasFixedPrice} onChange={(e) => setHasFixedPrice(e.target.checked)} />
@@ -645,7 +625,6 @@ function App() {
 
       case 'cart':
         const totalBs = roundToTwo(cart.reduce((sum, item) => sum + item.salePriceInBs * item.quantity, 0));
-        // Calculo Inverso Dólares: Total Bs / DailyRate
         const totalDollars = (dailyRate > 0) ? roundToTwo(totalBs / dailyRate) : 0;
 
         return (
