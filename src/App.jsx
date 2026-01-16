@@ -145,6 +145,10 @@ function App() {
   const [products, setProducts] = useState([]);
   const [cart, setCart] = useState([]);
   const [salesHistory, setSalesHistory] = useState([]);
+  // Estados para Reportes
+  const [dailyClosings, setDailyClosings] = useState([]);
+  const [selectedClosing, setSelectedClosing] = useState(null);
+  
   const [expandedSaleId, setExpandedSaleId] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showQuantityModal, setShowQuantityModal] = useState(false);
@@ -162,6 +166,7 @@ function App() {
   const [confirmModalTitle, setConfirmModalTitle] = useState('');
   const [onConfirmAction, setOnConfirmAction] = useState(() => {});
   const [showInventoryModal, setShowInventoryModal] = useState(false);
+  const [showClosingModal, setShowClosingModal] = useState(false); // Modal para ver cierre
   
   // Estados de formulario
   const [productName, setProductName] = useState('');
@@ -218,21 +223,29 @@ function App() {
       setProducts(productList.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name)));
     });
 
-    // Ventas
+    // Ventas (Carrito del día)
     const salesCollection = collection(db, `artifacts/${appId}/users/${userId}/salesHistory`);
-    const qSales = query(salesCollection, orderBy('createdAt', 'desc'), limit(50));
+    const qSales = query(salesCollection, orderBy('createdAt', 'desc'), limit(100));
     const unsubscribeSales = onSnapshot(qSales, (snapshot) => {
       const salesList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
       setSalesHistory(salesList);
     }, (error) => {
-         const simpleQuery = query(salesCollection, limit(50));
+         const simpleQuery = query(salesCollection, limit(100));
          getDocs(simpleQuery).then(snap => {
              const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
              setSalesHistory(list);
          });
     });
 
-    return () => { unsubscribeRate(); unsubscribeProducts(); unsubscribeSales(); };
+    // Cierres de Caja (Reportes) - NUEVO
+    const closingsCollection = collection(db, `artifacts/${appId}/users/${userId}/dailyClosings`);
+    const qClosings = query(closingsCollection, orderBy('createdAt', 'desc'), limit(30)); // Últimos 30 cierres
+    const unsubscribeClosings = onSnapshot(qClosings, (snapshot) => {
+        const closingList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+        setDailyClosings(closingList);
+    });
+
+    return () => { unsubscribeRate(); unsubscribeProducts(); unsubscribeSales(); unsubscribeClosings(); };
   }, [userId]);
 
   const handleRateInputChange = (e) => {
@@ -284,7 +297,6 @@ function App() {
         salePriceInDollars = (dailyRate > 0) ? roundToTwo(salePriceBs / dailyRate) : 0;
     } else {
         const profitMargin = product.profitPercentage / 100;
-        // Aquí se redondea el precio en dólares ANTES de convertir a Bs
         salePriceInDollars = roundToTwo(costInDollars * (1 + profitMargin));
         salePriceBs = (dailyRate > 0) ? roundToTwo(salePriceInDollars * dailyRate) : 0;
     }
@@ -413,35 +425,98 @@ function App() {
     setShowConfirmModal(true);
   };
 
-  const handleDownloadAndResetHistory = async () => {
-    if (salesHistory.length === 0) { showToast('No hay ventas', 'info'); return; }
+  // --- LÓGICA DE CIERRE DE CAJA NUEVA ---
+  const handleCloseDay = async () => {
+    if (salesHistory.length === 0) { showToast('No hay ventas para cerrar', 'info'); return; }
     
-    setConfirmModalTitle('Reporte de Ventas');
-    setConfirmModalMessage('¿Descargar reporte en PDF? (Tus datos NO serán borrados)');
+    setConfirmModalTitle('Cierre de Caja');
+    setConfirmModalMessage('¿Desea cerrar el día? Se guardará el reporte en la nube y se limpiará el historial.');
     
     setOnConfirmAction(() => async () => {
         try {
-            const docPdf = new jsPDF();
-            const salesToPrint = filteredSalesHistory.length > 0 ? filteredSalesHistory : salesHistory;
-            const columns = ["Fecha", "Total Bs", "Total $", "Ganancia", "Método"];
-            const data = salesToPrint.map(sale => [
-                formatDate(sale.createdAt), formatBs(sale.totalBs), formatUSD(sale.totalDollars),
-                formatBs(sale.totalProfitBs), sale.paymentMethod
-            ]);
+            // 1. Calcular Totales
+            const totalBsSum = roundToTwo(salesHistory.reduce((acc, sale) => acc + sale.totalBs, 0));
+            const totalDollarsSum = roundToTwo(salesHistory.reduce((acc, sale) => acc + sale.totalDollars, 0));
+            const totalProfitSum = roundToTwo(salesHistory.reduce((acc, sale) => acc + sale.totalProfitBs, 0));
             
-            const totalBsSum = salesToPrint.reduce((acc, sale) => acc + sale.totalBs, 0);
-            const totalDollarsSum = salesToPrint.reduce((acc, sale) => acc + sale.totalDollars, 0);
-            const totalProfitSum = salesToPrint.reduce((acc, sale) => acc + sale.totalProfitBs, 0);
-            data.push(["TOTALES:", formatBs(totalBsSum), formatUSD(totalDollarsSum), formatBs(totalProfitSum), ""]);
+            // 2. Crear Objeto de Cierre
+            const closingData = {
+                createdAt: serverTimestamp(),
+                totalBs: totalBsSum,
+                totalDollars: totalDollarsSum,
+                totalProfit: totalProfitSum,
+                salesCount: salesHistory.length,
+                salesData: salesHistory, // Guardamos copia de las ventas
+            };
 
-            docPdf.text("Reporte de Ventas", 14, 15);
-            docPdf.autoTable({ head: [columns], body: data, startY: 20 });
-            docPdf.save(`Reporte_Ventas_${new Date().toLocaleDateString().replace(/\//g,'-')}.pdf`);
-    
-            showToast('PDF Descargado', 'success');
-        } catch (e) { setGenericModalTitle('Error'); setGenericModalMessage(`Error: ${e.message}.`); setShowGenericModal(true); }
+            // 3. Guardar en Colección dailyClosings
+            await addDoc(collection(db, `artifacts/${appId}/users/${userId}/dailyClosings`), closingData);
+
+            // 4. Limpiar salesHistory (Solo si guardó con éxito)
+            const batchPromises = salesHistory.map(sale => 
+                deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/salesHistory`, sale.id))
+            );
+            await Promise.all(batchPromises);
+
+            showToast('Día cerrado y guardado exitosamente', 'success');
+        } catch (e) { 
+            setGenericModalTitle('Error'); 
+            setGenericModalMessage(`Error al cerrar caja: ${e.message}`); 
+            setShowGenericModal(true); 
+        }
     });
     setShowConfirmModal(true);
+  };
+
+  // --- REIMPRIMIR PDF DESDE REPORTE GUARDADO ---
+  const handleReprintPDF = (closingData) => {
+    try {
+        const docPdf = new jsPDF();
+        const salesToPrint = closingData.salesData;
+        const columns = ["Fecha", "Total Bs", "Total $", "Ganancia", "Método"];
+        
+        // Convertir Timestamp de Firebase a fecha legible si es necesario
+        const getFormattedDate = (dateVal) => {
+            if (!dateVal) return "-";
+            if (dateVal.toDate) return dateVal.toDate().toLocaleString(); // Es Timestamp
+            if (dateVal.seconds) return new Date(dateVal.seconds * 1000).toLocaleString(); // Es objeto seconds
+            return new Date(dateVal).toLocaleString(); // Es string/date
+        };
+
+        const data = salesToPrint.map(sale => [
+            getFormattedDate(sale.createdAt), 
+            formatBs(sale.totalBs), 
+            formatUSD(sale.totalDollars),
+            formatBs(sale.totalProfitBs), 
+            sale.paymentMethod
+        ]);
+        
+        data.push(["TOTALES:", formatBs(closingData.totalBs), formatUSD(closingData.totalDollars), formatBs(closingData.totalProfit), ""]);
+
+        const reportDate = getFormattedDate(closingData.createdAt);
+        docPdf.text(`Reporte de Ventas - Cierre: ${reportDate}`, 14, 15);
+        docPdf.autoTable({ head: [columns], body: data, startY: 20 });
+        docPdf.save(`Cierre_${reportDate.replace(/\//g,'-').replace(/:/g,'.')}.pdf`);
+
+        showToast('PDF Generado', 'success');
+    } catch (e) {
+        showToast('Error generando PDF', 'error');
+    }
+  };
+
+  const handleDeleteClosing = (closingId) => {
+      setConfirmModalTitle('Eliminar Reporte');
+      setConfirmModalMessage('¿Borrar este cierre permanentemente? Esta acción libera espacio pero no se puede deshacer.');
+      setOnConfirmAction(() => async () => {
+          try {
+              await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/dailyClosings`, closingId));
+              setShowClosingModal(false);
+              showToast('Reporte eliminado', 'info');
+          } catch(e) {
+              showToast('Error al eliminar', 'error');
+          }
+      });
+      setShowConfirmModal(true);
   };
 
   const handleCalculateWeight = () => {
@@ -484,17 +559,13 @@ function App() {
 
   const totalGlobalProfit = roundToTwo(salesHistory.reduce((sum, sale) => sum + sale.totalProfitBs, 0));
 
-  // --- CORRECCIÓN DE REDONDEO AQUÍ ---
   const calculateSuggestedPrice = () => {
       const pCost = parseFloat(productCost) || 0;
       const pRate = parseFloat(productAcquisitionRate) || 0;
       const pProfit = parseFloat(productProfit) || 0;
       
       const costInDollars = (pRate > 0) ? pCost / pRate : 0;
-      // IMPORTANTE: Redondeamos el precio en dólares a 2 decimales ANTES de multiplicar por la tasa
-      // Esto iguala la lógica de calculateSalePrice
       const suggestedInDollars = roundToTwo(costInDollars * (1 + (pProfit/100)));
-      
       const suggestedBs = (dailyRate > 0) ? suggestedInDollars * dailyRate : 0;
       return formatBs(suggestedBs);
   };
@@ -508,7 +579,17 @@ function App() {
         return (
           <div className="p-4 md:p-8 space-y-8 animate-fade-in-up">
             <div className="bg-white p-6 rounded-2xl shadow-lg border border-gray-200">
-              <h2 className="text-3xl font-bold mb-4 text-gray-800">Tasa del Día</h2>
+              {/* HEADER CON TÍTULO Y BOTÓN SALIR */}
+              <div className="flex justify-between items-start mb-6 border-b pb-4">
+                  <h2 className="text-3xl font-bold text-gray-800">Inicio</h2>
+                  <button onClick={handleLogout} className="flex items-center space-x-2 text-red-600 hover:text-red-800 bg-red-50 hover:bg-red-100 px-4 py-2 rounded-lg transition-colors">
+                      {/* Icono de Salir SVG Inline */}
+                      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+                      <span className="font-bold text-sm">Cerrar Sesión</span>
+                  </button>
+              </div>
+
+              <h3 className="text-2xl font-bold mb-4 text-gray-700">Tasa del Día</h3>
               <div className="flex flex-col md:flex-row items-center space-y-4 md:space-y-0 md:space-x-4">
                 <div className="relative w-full md:w-1/2">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 font-bold">$</span>
@@ -741,7 +822,11 @@ function App() {
                     <option value="">Todos los métodos</option>
                     {paymentMethods.map(method => <option key={method} value={method}>{method}</option>)}
                   </select>
-                  <button onClick={() => handleDownloadAndResetHistory()} className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl shadow-md">Descargar y Limpiar</button>
+                  {/* BOTÓN CAMBIADO: CERRAR CAJA / GUARDAR */}
+                  <button onClick={() => handleCloseDay()} className="px-6 py-3 bg-indigo-600 text-white font-bold rounded-xl shadow-md hover:bg-indigo-700 flex items-center gap-2">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                      Cerrar Caja (Guardar)
+                  </button>
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -768,6 +853,85 @@ function App() {
             </div>
           </div>
         );
+
+      case 'reports':
+          return (
+            <div className="p-4 md:p-8 space-y-8 animate-fade-in-up">
+              <div className="bg-white p-6 rounded-2xl shadow-lg border border-gray-200">
+                <h2 className="text-3xl font-bold mb-6 text-gray-800">Reportes de Cierre</h2>
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                            <tr>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Fecha Cierre</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Ventas</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Total Bs</th>
+                                <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wider">Total $</th>
+                                <th className="px-6 py-3 text-center text-xs font-bold text-gray-500 uppercase tracking-wider">Acción</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                            {dailyClosings.length === 0 ? (
+                                <tr><td colSpan="5" className="px-6 py-4 text-center text-gray-500">No hay reportes guardados.</td></tr>
+                            ) : (
+                                dailyClosings.map(closing => (
+                                    <tr key={closing.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => { setSelectedClosing(closing); setShowClosingModal(true); }}>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{formatDate(closing.createdAt)}</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{closing.salesCount} ventas</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-gray-800">Bs. {formatBs(closing.totalBs)}</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">$ {formatUSD(closing.totalDollars)}</td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-blue-600">Ver Detalles</td>
+                                    </tr>
+                                ))
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+              </div>
+              
+              {/* MODAL DETALLE REPORTE */}
+              {showClosingModal && selectedClosing && (
+                  <div className="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 p-4 animate-fade-in-up">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+                        <div className="p-6 border-b border-gray-200 flex justify-between items-center bg-gray-50 rounded-t-2xl">
+                            <h3 className="text-xl font-bold text-gray-800">Detalle Cierre</h3>
+                            <button onClick={() => setShowClosingModal(false)} className="text-gray-400 hover:text-gray-600 font-bold text-xl">×</button>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="bg-gray-50 p-3 rounded-lg">
+                                    <p className="text-xs text-gray-500 uppercase">Fecha</p>
+                                    <p className="font-semibold">{formatDate(selectedClosing.createdAt)}</p>
+                                </div>
+                                <div className="bg-blue-50 p-3 rounded-lg">
+                                    <p className="text-xs text-blue-500 uppercase">Total Ventas</p>
+                                    <p className="font-semibold text-blue-800">{selectedClosing.salesCount}</p>
+                                </div>
+                                <div className="bg-green-50 p-3 rounded-lg">
+                                    <p className="text-xs text-green-600 uppercase">Total Bs</p>
+                                    <p className="font-bold text-green-800 text-lg">Bs. {formatBs(selectedClosing.totalBs)}</p>
+                                </div>
+                                <div className="bg-indigo-50 p-3 rounded-lg">
+                                    <p className="text-xs text-indigo-600 uppercase">Total $</p>
+                                    <p className="font-bold text-indigo-800 text-lg">$ {formatUSD(selectedClosing.totalDollars)}</p>
+                                </div>
+                            </div>
+                            <div className="pt-4 border-t flex flex-col gap-3">
+                                <button onClick={() => handleReprintPDF(selectedClosing)} className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl shadow hover:bg-blue-700 flex justify-center items-center gap-2">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                                    Descargar PDF
+                                </button>
+                                <button onClick={() => handleDeleteClosing(selectedClosing.id)} className="w-full py-3 bg-white border border-red-200 text-red-600 font-bold rounded-xl hover:bg-red-50 flex justify-center items-center gap-2">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                                    Eliminar Registro Definitivamente
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                  </div>
+              )}
+            </div>
+          );
     }
     return null;
   };
@@ -778,12 +942,19 @@ function App() {
       {userId && (
         <div className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-200 shadow-md">
           <nav className="flex justify-around items-center h-16">
-            {['home', 'inventory', 'cart', 'history'].map(page => (
-                <button key={page} onClick={() => setCurrentPage(page)} className={`flex-1 flex flex-col items-center justify-center h-full text-sm font-semibold ${currentPage === page ? 'text-blue-600' : 'text-gray-600'}`}>
-                    <span className="capitalize">{page === 'home' ? 'Inicio' : page === 'history' ? 'Historial' : page === 'inventory' ? 'Inventario' : 'Carrito'}</span>
+            {['home', 'inventory', 'cart', 'history', 'reports'].map(page => (
+                <button key={page} onClick={() => setCurrentPage(page)} className={`flex-1 flex flex-col items-center justify-center h-full text-xs md:text-sm font-semibold ${currentPage === page ? 'text-blue-600' : 'text-gray-600'}`}>
+                    {/* Iconos Simples SVG Inline para no usar Lucide */}
+                    <div className="mb-1">
+                        {page === 'home' && <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>}
+                        {page === 'inventory' && <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>}
+                        {page === 'cart' && <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>}
+                        {page === 'history' && <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>}
+                        {page === 'reports' && <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>}
+                    </div>
+                    <span className="capitalize">{page === 'home' ? 'Inicio' : page === 'history' ? 'Historial' : page === 'inventory' ? 'Inventario' : page === 'cart' ? 'Carrito' : 'Reportes'}</span>
                 </button>
             ))}
-            <button onClick={handleLogout} className="flex-1 flex flex-col items-center justify-center h-full text-sm font-semibold text-red-600">Salir</button>
           </nav>
         </div>
       )}
