@@ -23,7 +23,7 @@ import {
 } from "firebase/firestore";
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
-import 'jspdf-autotable';
+import autoTable from 'jspdf-autotable'; // IMPORTACIÓN CORREGIDA
 
 // --- CONFIGURACIÓN FIREBASE ---
 const firebaseConfig = {
@@ -468,7 +468,7 @@ function App() {
     setShowConfirmModal(true);
   };
 
-  // --- REIMPRIMIR PDF CORREGIDO (ESTILO REFERENCIA) ---
+  // --- REIMPRIMIR PDF CORREGIDO (USANDO autoTable FUNCIONAL) ---
   const handleReprintPDF = (closingData) => {
     try {
         const docPdf = new jsPDF();
@@ -509,7 +509,8 @@ function App() {
             ""
         ]);
 
-        docPdf.autoTable({
+        // USO CORREGIDO DE autoTable
+        autoTable(docPdf, {
             head: [columnsHist],
             body: dataHist,
             startY: 20,
@@ -554,7 +555,8 @@ function App() {
         // Añadir espacio antes del segundo título
         docPdf.text("Resumen por Método de Pago", 14, finalY + 25);
 
-        docPdf.autoTable({
+        // USO CORREGIDO DE autoTable
+        autoTable(docPdf, {
             head: [columnsSummary],
             body: dataSummary,
             startY: finalY + 30,
