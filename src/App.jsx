@@ -468,39 +468,105 @@ function App() {
     setShowConfirmModal(true);
   };
 
-  // --- REIMPRIMIR PDF DESDE REPORTE GUARDADO ---
+  // --- REIMPRIMIR PDF CORREGIDO (ESTILO REFERENCIA) ---
   const handleReprintPDF = (closingData) => {
     try {
         const docPdf = new jsPDF();
         const salesToPrint = closingData.salesData;
-        const columns = ["Fecha", "Total Bs", "Total $", "Ganancia", "Método"];
-        
-        // Convertir Timestamp de Firebase a fecha legible si es necesario
+
+        // Helper para fechas
         const getFormattedDate = (dateVal) => {
             if (!dateVal) return "-";
-            if (dateVal.toDate) return dateVal.toDate().toLocaleString(); // Es Timestamp
-            if (dateVal.seconds) return new Date(dateVal.seconds * 1000).toLocaleString(); // Es objeto seconds
-            return new Date(dateVal).toLocaleString(); // Es string/date
+            if (dateVal.toDate) return dateVal.toDate().toLocaleString();
+            if (dateVal.seconds) return new Date(dateVal.seconds * 1000).toLocaleString();
+            return new Date(dateVal).toLocaleString();
         };
 
-        const data = salesToPrint.map(sale => [
-            getFormattedDate(sale.createdAt), 
-            formatBs(sale.totalBs), 
-            formatUSD(sale.totalDollars),
-            formatBs(sale.totalProfitBs), 
+        const reportDate = getFormattedDate(closingData.createdAt);
+
+        // --- PÁGINA 1: Historial de Ventas ---
+        docPdf.setFontSize(16);
+        docPdf.text(`Historial de Ventas - Cierre: ${reportDate}`, 14, 15);
+
+        // Columnas coincidentes con la referencia PDF
+        const columnsHist = ["Fecha", "Total $", "Total Bs", "Ganancia Bs", "Método de Pago"];
+
+        // Datos de filas coincidentes con la estructura
+        const dataHist = salesToPrint.map(sale => [
+            getFormattedDate(sale.createdAt),
+            formatUSD(sale.totalDollars), // Total $ primero
+            formatBs(sale.totalBs),       // Total Bs segundo
+            formatBs(sale.totalProfitBs), // Ganancia Bs tercero
             sale.paymentMethod
         ]);
+
+        // Fila de Totales para el Historial
+        dataHist.push([
+            "TOTALES:",
+            formatUSD(closingData.totalDollars),
+            formatBs(closingData.totalBs),
+            formatBs(closingData.totalProfit),
+            ""
+        ]);
+
+        docPdf.autoTable({
+            head: [columnsHist],
+            body: dataHist,
+            startY: 20,
+            theme: 'grid',
+            headStyles: { fillColor: [60, 60, 60] },
+        });
+
+        // --- PÁGINA 2 (o continuación): Resumen por Método de Pago ---
+
+        // 1. Calcular agregados
+        const summaryByMethod = {};
+        paymentMethods.forEach(method => {
+            summaryByMethod[method] = { totalBs: 0, totalDollars: 0, profitBs: 0 };
+        });
+
+        salesToPrint.forEach(sale => {
+            const method = sale.paymentMethod;
+            if (summaryByMethod[method]) {
+                summaryByMethod[method].totalBs += sale.totalBs;
+                summaryByMethod[method].totalDollars += sale.totalDollars;
+                summaryByMethod[method].profitBs += sale.totalProfitBs;
+            }
+        });
+
+        // 2. Preparar datos de la tabla resumen
+        const columnsSummary = ["Método de Pago", "Venta Total (Bs)", "Ganancia Total (Bs)", "Venta Total ($)"];
         
-        data.push(["TOTALES:", formatBs(closingData.totalBs), formatUSD(closingData.totalDollars), formatBs(closingData.totalProfit), ""]);
+        const dataSummary = Object.keys(summaryByMethod)
+            .filter(method => summaryByMethod[method].totalBs > 0) // Solo mostrar métodos con ventas
+            .map(method => [
+                method,
+                formatBs(summaryByMethod[method].totalBs),
+                formatBs(summaryByMethod[method].profitBs),
+                formatUSD(summaryByMethod[method].totalDollars),
+            ]);
 
-        const reportDate = getFormattedDate(closingData.createdAt);
-        docPdf.text(`Reporte de Ventas - Cierre: ${reportDate}`, 14, 15);
-        docPdf.autoTable({ head: [columns], body: data, startY: 20 });
-        docPdf.save(`Cierre_${reportDate.replace(/\//g,'-').replace(/:/g,'.')}.pdf`);
 
+        // 3. Agregar segunda tabla al PDF
+        let finalY = docPdf.lastAutoTable.finalY || 20; // Obtener posición Y final de la tabla anterior
+
+        docPdf.setFontSize(14);
+        // Añadir espacio antes del segundo título
+        docPdf.text("Resumen por Método de Pago", 14, finalY + 25);
+
+        docPdf.autoTable({
+            head: [columnsSummary],
+            body: dataSummary,
+            startY: finalY + 30,
+            theme: 'grid',
+            headStyles: { fillColor: [40, 100, 200] },
+        });
+
+        docPdf.save(`Cierre_${reportDate.replace(/\//g,'-').replace(/:/g,'.').replace(/ /g,'_')}.pdf`);
         showToast('PDF Generado', 'success');
     } catch (e) {
-        showToast('Error generando PDF', 'error');
+        console.error(e);
+        showToast('Error generando PDF: ' + e.message, 'error');
     }
   };
 
@@ -822,7 +888,7 @@ function App() {
                     <option value="">Todos los métodos</option>
                     {paymentMethods.map(method => <option key={method} value={method}>{method}</option>)}
                   </select>
-                  {/* BOTÓN CAMBIADO: CERRAR CAJA / GUARDAR */}
+                  {/* BOTÓN CERRAR CAJA / GUARDAR */}
                   <button onClick={() => handleCloseDay()} className="px-6 py-3 bg-indigo-600 text-white font-bold rounded-xl shadow-md hover:bg-indigo-700 flex items-center gap-2">
                       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
                       Cerrar Caja (Guardar)
@@ -889,19 +955,23 @@ function App() {
                 </div>
               </div>
               
-              {/* MODAL DETALLE REPORTE */}
+              {/* MODAL DETALLE REPORTE - MODIFICADO */}
               {showClosingModal && selectedClosing && (
                   <div className="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 p-4 animate-fade-in-up">
                     <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
                         <div className="p-6 border-b border-gray-200 flex justify-between items-center bg-gray-50 rounded-t-2xl">
-                            <h3 className="text-xl font-bold text-gray-800">Detalle Cierre</h3>
+                            {/* Fecha movida al encabezado */}
+                            <h3 className="text-xl font-bold text-gray-800">
+                                Detalle Cierre - <span className="text-base font-medium ml-2">{formatDate(selectedClosing.createdAt)}</span>
+                            </h3>
                             <button onClick={() => setShowClosingModal(false)} className="text-gray-400 hover:text-gray-600 font-bold text-xl">×</button>
                         </div>
                         <div className="p-6 space-y-4">
                             <div className="grid grid-cols-2 gap-4">
-                                <div className="bg-gray-50 p-3 rounded-lg">
-                                    <p className="text-xs text-gray-500 uppercase">Fecha</p>
-                                    <p className="font-semibold">{formatDate(selectedClosing.createdAt)}</p>
+                                {/* Caja de Ganancia Total (Reemplaza a Fecha) */}
+                                <div className="bg-yellow-50 p-3 rounded-lg">
+                                    <p className="text-xs text-yellow-600 uppercase">Ganancia Total</p>
+                                    <p className="font-bold text-yellow-800 text-lg">Bs. {formatBs(selectedClosing.totalProfit)}</p>
                                 </div>
                                 <div className="bg-blue-50 p-3 rounded-lg">
                                     <p className="text-xs text-blue-500 uppercase">Total Ventas</p>
