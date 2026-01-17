@@ -21,9 +21,9 @@ import {
   serverTimestamp, 
   getDocs 
 } from "firebase/firestore";
-import html2canvas from 'html2canvas';
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable'; // IMPORTACIÓN CORREGIDA
+
+// NOTA: Se eliminaron los imports estáticos para mejorar la velocidad inicial.
+// Las librerías se cargarán solo cuando se necesiten.
 
 // --- CONFIGURACIÓN FIREBASE ---
 const firebaseConfig = {
@@ -73,7 +73,7 @@ const paymentMethods = ['Biopago', 'Bolívares en Efectivo', 'Dolares en Efectiv
 // --- COMPONENTES VISUALES ---
 const Toast = ({ message, type, onClose }) => {
   useEffect(() => {
-    const timer = setTimeout(() => { onClose(); }, 1500);
+    const timer = setTimeout(() => { onClose(); }, 2500);
     return () => clearTimeout(timer);
   }, [onClose]);
 
@@ -166,7 +166,8 @@ function App() {
   const [confirmModalTitle, setConfirmModalTitle] = useState('');
   const [onConfirmAction, setOnConfirmAction] = useState(() => {});
   const [showInventoryModal, setShowInventoryModal] = useState(false);
-  const [showClosingModal, setShowClosingModal] = useState(false); // Modal para ver cierre
+  const [showClosingModal, setShowClosingModal] = useState(false);
+  const [isPdfLoading, setIsPdfLoading] = useState(false); // NUEVO ESTADO PARA EL BOTÓN PDF
   
   // Estados de formulario
   const [productName, setProductName] = useState('');
@@ -237,9 +238,9 @@ function App() {
          });
     });
 
-    // Cierres de Caja (Reportes) - NUEVO
+    // Cierres de Caja (Reportes)
     const closingsCollection = collection(db, `artifacts/${appId}/users/${userId}/dailyClosings`);
-    const qClosings = query(closingsCollection, orderBy('createdAt', 'desc'), limit(30)); // Últimos 30 cierres
+    const qClosings = query(closingsCollection, orderBy('createdAt', 'desc'), limit(30)); 
     const unsubscribeClosings = onSnapshot(qClosings, (snapshot) => {
         const closingList = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
         setDailyClosings(closingList);
@@ -425,7 +426,7 @@ function App() {
     setShowConfirmModal(true);
   };
 
-  // --- LÓGICA DE CIERRE DE CAJA NUEVA ---
+  // --- LÓGICA DE CIERRE DE CAJA ---
   const handleCloseDay = async () => {
     if (salesHistory.length === 0) { showToast('No hay ventas para cerrar', 'info'); return; }
     
@@ -434,25 +435,21 @@ function App() {
     
     setOnConfirmAction(() => async () => {
         try {
-            // 1. Calcular Totales
             const totalBsSum = roundToTwo(salesHistory.reduce((acc, sale) => acc + sale.totalBs, 0));
             const totalDollarsSum = roundToTwo(salesHistory.reduce((acc, sale) => acc + sale.totalDollars, 0));
             const totalProfitSum = roundToTwo(salesHistory.reduce((acc, sale) => acc + sale.totalProfitBs, 0));
             
-            // 2. Crear Objeto de Cierre
             const closingData = {
                 createdAt: serverTimestamp(),
                 totalBs: totalBsSum,
                 totalDollars: totalDollarsSum,
                 totalProfit: totalProfitSum,
                 salesCount: salesHistory.length,
-                salesData: salesHistory, // Guardamos copia de las ventas
+                salesData: salesHistory,
             };
 
-            // 3. Guardar en Colección dailyClosings
             await addDoc(collection(db, `artifacts/${appId}/users/${userId}/dailyClosings`), closingData);
 
-            // 4. Limpiar salesHistory (Solo si guardó con éxito)
             const batchPromises = salesHistory.map(sale => 
                 deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/salesHistory`, sale.id))
             );
@@ -468,13 +465,20 @@ function App() {
     setShowConfirmModal(true);
   };
 
-  // --- REIMPRIMIR PDF CORREGIDO (USANDO autoTable FUNCIONAL) ---
-  const handleReprintPDF = (closingData) => {
+  // --- REIMPRIMIR PDF CON FEEDBACK VISUAL MEJORADO ---
+  const handleReprintPDF = async (closingData) => {
+    // 1. ACTIVAR ESTADO DE CARGA (BOTÓN)
+    setIsPdfLoading(true);
+    
     try {
+        // IMPORTACIÓN DINÁMICA
+        const { jsPDF } = await import('jspdf');
+        const autoTableModule = await import('jspdf-autotable');
+        const autoTable = autoTableModule.default;
+
         const docPdf = new jsPDF();
         const salesToPrint = closingData.salesData;
 
-        // Helper para fechas
         const getFormattedDate = (dateVal) => {
             if (!dateVal) return "-";
             if (dateVal.toDate) return dateVal.toDate().toLocaleString();
@@ -484,23 +488,19 @@ function App() {
 
         const reportDate = getFormattedDate(closingData.createdAt);
 
-        // --- PÁGINA 1: Historial de Ventas ---
         docPdf.setFontSize(16);
         docPdf.text(`Historial de Ventas - Cierre: ${reportDate}`, 14, 15);
 
-        // Columnas coincidentes con la referencia PDF
         const columnsHist = ["Fecha", "Total $", "Total Bs", "Ganancia Bs", "Método de Pago"];
 
-        // Datos de filas coincidentes con la estructura
         const dataHist = salesToPrint.map(sale => [
             getFormattedDate(sale.createdAt),
-            formatUSD(sale.totalDollars), // Total $ primero
-            formatBs(sale.totalBs),       // Total Bs segundo
-            formatBs(sale.totalProfitBs), // Ganancia Bs tercero
+            formatUSD(sale.totalDollars),
+            formatBs(sale.totalBs),
+            formatBs(sale.totalProfitBs),
             sale.paymentMethod
         ]);
 
-        // Fila de Totales para el Historial
         dataHist.push([
             "TOTALES:",
             formatUSD(closingData.totalDollars),
@@ -509,7 +509,6 @@ function App() {
             ""
         ]);
 
-        // USO CORREGIDO DE autoTable
         autoTable(docPdf, {
             head: [columnsHist],
             body: dataHist,
@@ -518,9 +517,6 @@ function App() {
             headStyles: { fillColor: [60, 60, 60] },
         });
 
-        // --- PÁGINA 2 (o continuación): Resumen por Método de Pago ---
-
-        // 1. Calcular agregados
         const summaryByMethod = {};
         paymentMethods.forEach(method => {
             summaryByMethod[method] = { totalBs: 0, totalDollars: 0, profitBs: 0 };
@@ -535,11 +531,10 @@ function App() {
             }
         });
 
-        // 2. Preparar datos de la tabla resumen
         const columnsSummary = ["Método de Pago", "Venta Total (Bs)", "Ganancia Total (Bs)", "Venta Total ($)"];
         
         const dataSummary = Object.keys(summaryByMethod)
-            .filter(method => summaryByMethod[method].totalBs > 0) // Solo mostrar métodos con ventas
+            .filter(method => summaryByMethod[method].totalBs > 0)
             .map(method => [
                 method,
                 formatBs(summaryByMethod[method].totalBs),
@@ -547,15 +542,11 @@ function App() {
                 formatUSD(summaryByMethod[method].totalDollars),
             ]);
 
-
-        // 3. Agregar segunda tabla al PDF
-        let finalY = docPdf.lastAutoTable.finalY || 20; // Obtener posición Y final de la tabla anterior
+        let finalY = docPdf.lastAutoTable.finalY || 20;
 
         docPdf.setFontSize(14);
-        // Añadir espacio antes del segundo título
         docPdf.text("Resumen por Método de Pago", 14, finalY + 25);
 
-        // USO CORREGIDO DE autoTable
         autoTable(docPdf, {
             head: [columnsSummary],
             body: dataSummary,
@@ -569,6 +560,9 @@ function App() {
     } catch (e) {
         console.error(e);
         showToast('Error generando PDF: ' + e.message, 'error');
+    } finally {
+        // 2. APAGAR ESTADO DE CARGA (BOTÓN)
+        setIsPdfLoading(false);
     }
   };
 
@@ -606,11 +600,18 @@ function App() {
   const handleShareCart = async () => {
     const summaryElement = document.getElementById('cart-summary-capture');
     if (!summaryElement) return;
-    const totalBsShare = roundToTwo(cart.reduce((sum, item) => sum + item.salePriceInBs * item.quantity, 0));
-    const shareText = `Total: Bs. ${formatBs(totalBsShare)}`;
+    
     showToast('Procesando imagen...', 'info');
+    
     try {
+      const html2canvasModule = await import('html2canvas');
+      const html2canvas = html2canvasModule.default;
+
+      const totalBsShare = roundToTwo(cart.reduce((sum, item) => sum + item.salePriceInBs * item.quantity, 0));
+      const shareText = `Total: Bs. ${formatBs(totalBsShare)}`;
+      
       try { await navigator.clipboard.writeText(shareText); } catch (e) {}
+      
       const canvas = await html2canvas(summaryElement, { scale: 2, backgroundColor: "#F3F4F6" });
       canvas.toBlob(async (blob) => {
         if (!blob) return;
@@ -989,9 +990,26 @@ function App() {
                                 </div>
                             </div>
                             <div className="pt-4 border-t flex flex-col gap-3">
-                                <button onClick={() => handleReprintPDF(selectedClosing)} className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl shadow hover:bg-blue-700 flex justify-center items-center gap-2">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-                                    Descargar PDF
+                                {/* BOTÓN PDF CON FEEDBACK VISUAL */}
+                                <button 
+                                    onClick={() => handleReprintPDF(selectedClosing)} 
+                                    disabled={isPdfLoading}
+                                    className={`w-full py-3 text-white font-bold rounded-xl shadow flex justify-center items-center gap-2 transition-all ${isPdfLoading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                                >
+                                    {isPdfLoading ? (
+                                        <>
+                                            <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            Generando PDF...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                                            Descargar PDF
+                                        </>
+                                    )}
                                 </button>
                                 <button onClick={() => handleDeleteClosing(selectedClosing.id)} className="w-full py-3 bg-white border border-red-200 text-red-600 font-bold rounded-xl hover:bg-red-50 flex justify-center items-center gap-2">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
